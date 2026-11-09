@@ -55,6 +55,8 @@ struct tas2562_data {
 	int model_id;
 	bool dac_powered;
 	bool unmuted;
+	/* the machine driver set TDM slots: their width is not ours to change */
+	bool tdm_slots_set;
 };
 
 enum tas256x_model {
@@ -207,6 +209,9 @@ static int tas2562_set_dai_tdm_slot(struct snd_soc_dai *dai,
 	if (ret < 0)
 		return ret;
 
+	if (slot_width)
+		tas2562->tdm_slots_set = true;
+
 	ret = snd_soc_component_update_bits(component, TAS2562_TDM_CFG5,
 					    TAS2562_TDM_CFG5_VSNS_SLOT_MASK,
 					    tas2562->v_sense_slot);
@@ -251,6 +256,23 @@ static int tas2562_set_bitwidth(struct tas2562_data *tas2562, int bitwidth)
 	default:
 		dev_info(tas2562->dev, "Unsupported bitwidth format\n");
 		return -EINVAL;
+	}
+
+	/*
+	 * Without TDM slots from the machine driver the bus is plain I2S, its
+	 * slots as wide as the samples' container. The reset default is 32 bits:
+	 * with 16-bit samples on a 32 * fs bit clock the right slot then lies
+	 * beyond the frame, and the right channel is silent.
+	 */
+	if (!tas2562->tdm_slots_set) {
+		ret = snd_soc_component_update_bits(tas2562->component,
+						    TAS2562_TDM_CFG2,
+						    TAS2562_TDM_CFG2_RXLEN_MASK,
+						    snd_pcm_format_physical_width(bitwidth) == 16 ?
+						    TAS2562_TDM_CFG2_RXLEN_16B :
+						    TAS2562_TDM_CFG2_RXLEN_32B);
+		if (ret < 0)
+			return ret;
 	}
 
 	val = snd_soc_component_read(tas2562->component, TAS2562_PWR_CTRL);
