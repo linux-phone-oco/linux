@@ -26,21 +26,24 @@
 			 SNDRV_PCM_FORMAT_S32_LE)
 
 /* DVC equation involves floating point math
- * round(10^(volume in dB/20)*2^30)
+ * floor(10^(volume in dB/20)*2^30), -110 dB to 0 dB in 2 dB steps
  * so create a lookup table for 2dB step
  */
 static const unsigned int float_vol_db_lookup[] = {
-0x00000d43, 0x000010b2, 0x00001505, 0x00001a67, 0x00002151,
-0x000029f1, 0x000034cd, 0x00004279, 0x000053af, 0x0000695b,
-0x0000695b, 0x0000a6fa, 0x0000d236, 0x000108a4, 0x00014d2a,
-0x0001a36e, 0x00021008, 0x000298c0, 0x000344df, 0x00041d8f,
-0x00052e5a, 0x000685c8, 0x00083621, 0x000a566d, 0x000d03a7,
-0x0010624d, 0x0014a050, 0x0019f786, 0x0020b0bc, 0x0029279d,
-0x0033cf8d, 0x004139d3, 0x00521d50, 0x00676044, 0x0082248a,
-0x00a3d70a, 0x00ce4328, 0x0103ab3d, 0x0146e75d, 0x019b8c27,
-0x02061b89, 0x028c423f, 0x03352529, 0x0409c2b0, 0x05156d68,
-0x080e9f96, 0x0a24b062, 0x0cc509ab, 0x10137987, 0x143d1362,
-0x197a967f, 0x2013739e, 0x28619ae9, 0x32d64617, 0x40000000
+	0x00000d43, 0x000010b2, 0x00001505, 0x00001a76,
+	0x00002151, 0x000029f1, 0x000034cd, 0x00004279,
+	0x000053af, 0x0000695b, 0x000084a2, 0x0000a6fa,
+	0x0000d236, 0x000108a4, 0x00014d2a, 0x0001a36e,
+	0x00021008, 0x000298c0, 0x000344df, 0x00041d8f,
+	0x00052e5a, 0x000685c8, 0x00083621, 0x000a566d,
+	0x000d03a7, 0x0010624d, 0x0014a050, 0x0019f786,
+	0x0020b0bc, 0x0029279d, 0x0033cf8d, 0x004139d3,
+	0x00521d50, 0x00676044, 0x0082248a, 0x00a3d70a,
+	0x00ce4328, 0x0103ab3d, 0x0146e75d, 0x019b8c27,
+	0x02061b89, 0x028c423f, 0x03352529, 0x0409c2b0,
+	0x05156d68, 0x06666666, 0x080e9f96, 0x0a24b062,
+	0x0cc509ab, 0x10137987, 0x143d1362, 0x197a967f,
+	0x2013739e, 0x28619ae9, 0x32d64617, 0x40000000,
 };
 
 struct tas2562_data {
@@ -496,21 +499,25 @@ static int tas2562_volume_control_put(struct snd_kcontrol *kcontrol,
 	int ret;
 	u32 reg_val;
 
-	reg_val = float_vol_db_lookup[ucontrol->value.integer.value[0]/2];
-	ret = snd_soc_component_write(component, TAS2562_DVC_CFG4,
-				      (reg_val & 0xff));
-	if (ret)
-		return ret;
-	ret = snd_soc_component_write(component, TAS2562_DVC_CFG3,
-				      ((reg_val >> 8) & 0xff));
+	/* -110 dB to 0 dB in 2 dB steps: 56 entries for the control's 0..110 */
+	reg_val = float_vol_db_lookup[min_t(long, ucontrol->value.integer.value[0] / 2,
+						 ARRAY_SIZE(float_vol_db_lookup) - 1)];
+	/* The chip takes the 32-bit volume when its last byte (DVC_CFG4) is written, from what the
+	 * other three hold at that moment: write them first, most significant byte first. */
+	ret = snd_soc_component_write(component, TAS2562_DVC_CFG1,
+			((reg_val >> 24) & 0xff));
 	if (ret)
 		return ret;
 	ret = snd_soc_component_write(component, TAS2562_DVC_CFG2,
-				      ((reg_val >> 16) & 0xff));
+			((reg_val >> 16) & 0xff));
 	if (ret)
 		return ret;
-	ret = snd_soc_component_write(component, TAS2562_DVC_CFG1,
-				      ((reg_val >> 24) & 0xff));
+	ret = snd_soc_component_write(component, TAS2562_DVC_CFG3,
+			((reg_val >> 8) & 0xff));
+	if (ret)
+		return ret;
+	ret = snd_soc_component_write(component, TAS2562_DVC_CFG4,
+			(reg_val & 0xff));
 	if (ret)
 		return ret;
 
@@ -652,6 +659,8 @@ static const struct regmap_range_cfg tas2562_ranges[] = {
 	},
 };
 
+/* No defaults for the volume (DVC_CFG1-4): a cache sync must always write them, in order, so the
+ * chip latches the full value - a byte equal to a default would be skipped and never latched. */
 static const struct reg_default tas2562_reg_defaults[] = {
 	{ TAS2562_PAGE_CTRL, 0x00 },
 	{ TAS2562_SW_RESET, 0x00 },
@@ -659,10 +668,6 @@ static const struct reg_default tas2562_reg_defaults[] = {
 	{ TAS2562_PB_CFG1, 0x20 },
 	{ TAS2562_TDM_CFG0, 0x09 },
 	{ TAS2562_TDM_CFG1, 0x02 },
-	{ TAS2562_DVC_CFG1, 0x40 },
-	{ TAS2562_DVC_CFG2, 0x40 },
-	{ TAS2562_DVC_CFG3, 0x00 },
-	{ TAS2562_DVC_CFG4, 0x00 },
 };
 
 static const struct regmap_config tas2562_regmap_config = {
